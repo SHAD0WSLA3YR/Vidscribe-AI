@@ -1,21 +1,10 @@
 import { NextResponse } from 'next/server';
-import { nanoid } from 'nanoid';
+import { ASSEMBLY_BASE_URL } from '@/lib/assemblyai';
 
-const ASSEMBLY_BASE_URL = 'https://api.assemblyai.com/v2';
-const POLL_INTERVAL_MS = 5_000; // Poll every 5 seconds
-const POLL_TIMEOUT_MS = 120 * 60 * 1_000; // 120 minutes (2 hours) - enough for very long videos
-
-// Configure route for longer execution time
-export const maxDuration = 300; // 5 minutes max execution (Vercel Pro allows up to 300s)
-
-async function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function toSeconds(ms?: number | null) {
-  if (typeof ms !== 'number') return null;
-  return ms / 1000;
-}
+// This request only uploads the file and starts the AssemblyAI job, then
+// returns immediately. The browser polls GET /api/transcribe/status for
+// completion, so long transcriptions never block a serverless function.
+export const maxDuration = 60;
 
 export async function POST(request: Request) {
   if (!process.env.ASSEMBLYAI_API_KEY) {
@@ -115,166 +104,10 @@ export async function POST(request: Request) {
       id: string;
       status: string;
     };
-    console.log(
-      `[Transcribe] Job created: ${transcriptJob.id}, polling for completion...`
-    );
+    console.log(`[Transcribe] Job created: ${transcriptJob.id}`);
 
-    const startedAt = Date.now();
-    let transcriptResult: any = null;
-    let pollCount = 0;
-    // Poll for completion
-    while (Date.now() - startedAt < POLL_TIMEOUT_MS) {
-      pollCount++;
-      const pollingResponse = await fetch(
-        `${ASSEMBLY_BASE_URL}/transcript/${transcriptJob.id}`,
-        {
-          headers: {
-            authorization: process.env.ASSEMBLYAI_API_KEY!,
-          },
-        }
-      );
-
-      if (!pollingResponse.ok) {
-        const errorText = await pollingResponse.text();
-        console.error('[Transcribe] AssemblyAI polling failed:', errorText);
-        return NextResponse.json(
-          { error: 'Failed to poll AssemblyAI transcript status' },
-          { status: 502 }
-        );
-      }
-
-      const pollingData = await pollingResponse.json();
-
-      // Log status every 10 polls
-      if (pollCount % 10 === 0) {
-        console.log(
-          `[Transcribe] Poll #${pollCount}, status: ${
-            pollingData.status
-          }, elapsed: ${Math.round((Date.now() - startedAt) / 1000)}s`
-        );
-      }
-
-      if (pollingData.status === 'completed') {
-        transcriptResult = pollingData;
-        console.log(
-          `[Transcribe] Transcription completed after ${pollCount} polls (${Math.round(
-            (Date.now() - startedAt) / 1000
-          )}s)`
-        );
-        if (pollingData.language_code) {
-          console.log(
-            `[Transcribe] Detected language: ${pollingData.language_code} (confidence: ${pollingData.language_confidence ?? 'N/A'})`
-          );
-        }
-        break;
-      }
-      if (pollingData.status === 'error') {
-        console.error(
-          '[Transcribe] AssemblyAI transcription error:',
-          pollingData.error
-        );
-        return NextResponse.json(
-          { error: `AssemblyAI transcription failed: ${pollingData.error}` },
-          { status: 502 }
-        );
-      }
-      await sleep(POLL_INTERVAL_MS);
-    }
-
-    if (!transcriptResult) {
-      console.error(
-        `[Transcribe] Transcription timed out after ${pollCount} polls`
-      );
-      return NextResponse.json(
-        { error: 'AssemblyAI transcription timed out' },
-        { status: 504 }
-      );
-    }
-
-    let paragraphs: Array<{
-      id: string;
-      start: number;
-      end: number;
-      text: string;
-      words?: Array<{ start: number; end: number; text: string }>;
-    }> = [];
-
-    try {
-      const paragraphsResponse = await fetch(
-        `${ASSEMBLY_BASE_URL}/transcript/${transcriptResult.id}/paragraphs`,
-        {
-          headers: {
-            authorization: process.env.ASSEMBLYAI_API_KEY!,
-          },
-        }
-      );
-
-      if (paragraphsResponse.ok) {
-        const paragraphsData = (await paragraphsResponse.json()) as {
-          paragraphs?: Array<{
-            id: string;
-            start: number;
-            end: number;
-            text: string;
-            words?: Array<{ start: number; end: number; text: string }>;
-          }>;
-        };
-        paragraphs = paragraphsData.paragraphs ?? [];
-      }
-    } catch (error) {
-      console.warn('AssemblyAI paragraphs fetch failed', error);
-    }
-
-    const segments = (
-      paragraphs.length > 0
-        ? paragraphs
-        : [
-            {
-              id: `segment-${nanoid()}`,
-              start: transcriptResult.start ?? 0,
-              end: transcriptResult.end ?? null,
-              text: transcriptResult.text ?? '',
-              words: transcriptResult.words ?? [],
-            },
-          ]
-    )
-      .filter((segment) =>
-        typeof segment.text === 'string'
-          ? segment.text.trim().length > 0
-          : false
-      )
-      .map((segment) => {
-        const words = Array.isArray(segment.words)
-          ? segment.words.map((word) => ({
-              start: toSeconds(word.start) ?? toSeconds(segment.start) ?? 0,
-              end: toSeconds(word.end) ?? toSeconds(segment.end) ?? 0,
-              text: word.text ?? '',
-            }))
-          : [];
-
-        return {
-          id: segment.id ?? `segment-${nanoid()}`,
-          start: toSeconds(segment.start) ?? words.at(0)?.start ?? 0,
-          end:
-            toSeconds(segment.end) ??
-            words.at(-1)?.end ??
-            toSeconds(segment.start) ??
-            0,
-          text: typeof segment.text === 'string' ? segment.text : '',
-          words,
-        };
-      });
-
-    const duration =
-      typeof transcriptResult.audio_duration === 'number'
-        ? transcriptResult.audio_duration
-        : segments.at(-1)?.end ?? null;
-
-    return NextResponse.json({
-      segments,
-      text: transcriptResult.text,
-      duration,
-    });
+    // Return immediately — the client polls GET /api/transcribe/status.
+    return NextResponse.json({ jobId: transcriptJob.id });
   } catch (error) {
     console.error('[Transcribe] Transcription failed:', error);
     const details =
@@ -299,7 +132,7 @@ export async function POST(request: Request) {
         return NextResponse.json(
           {
             error:
-              'Request timed out. Very long videos may need more time to process.',
+              'Request timed out while starting transcription. Please try again.',
             details,
           },
           { status: 504 }
@@ -308,7 +141,7 @@ export async function POST(request: Request) {
     }
 
     return NextResponse.json(
-      { error: 'Failed to transcribe video', details },
+      { error: 'Failed to start transcription', details },
       { status: 500 }
     );
   }

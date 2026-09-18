@@ -22,8 +22,9 @@ Upload a video, get a transcript you can edit while the video stays in sync, gen
 
 ```
 User uploads a video (FormData)
-  → /api/transcribe buffers the file in memory and forwards it to AssemblyAI,
-    creates a transcription job, and polls until it completes
+  → POST /api/transcribe buffers the file in memory and starts an
+    AssemblyAI job, returning immediately with a job ID
+  → browser polls GET /api/transcribe/status until the job completes
   → transcript segments render in the Slate editor, synced to video playback
   → /api/chapters, /api/summary, /api/title, /api/explain, /api/translate
     call OpenRouter-hosted chat models for AI features
@@ -137,7 +138,8 @@ Optional (server-only; each has a default in code):
 
 All routes live under `app/api/` and accept/return JSON unless noted.
 
-- `POST /api/transcribe` — accepts `multipart/form-data` with `file` (video) and optional `keyterms` (JSON string array). Returns `{ segments, text, duration }`. Talks to AssemblyAI. Long-running: polls server-side until transcription completes.
+- `POST /api/transcribe` — accepts `multipart/form-data` with `file` (video) and optional `keyterms` (JSON string array). Uploads to AssemblyAI, creates a transcription job, and returns `{ jobId }` immediately without waiting. Talks to AssemblyAI.
+- `GET /api/transcribe/status?jobId=...` — returns `{ status: "processing", jobId }` while the job runs, `{ status: "completed", jobId, segments, text, duration, language_code? }` when done, or `{ status: "error", jobId?, error }` on failure. Each call is a single fast AssemblyAI lookup. Talks to AssemblyAI.
 - `POST /api/chapters` — accepts `{ transcript: [{ start, text }], duration?, maxChapters? }`. Returns `{ chapters: [{ id, title, start }] }`. Talks to OpenRouter.
 - `POST /api/summary` — accepts `{ transcript, duration? }`. Returns `{ summary }`. Talks to OpenRouter.
 - `POST /api/title` — accepts `{ transcript, duration? }`. Returns `{ title }`. Talks to OpenRouter.
@@ -168,8 +170,8 @@ Intended target: **Vercel**.
 
 ### Current Deployment Notes
 
-- `/api/transcribe` sets `export const maxDuration = 300` (a Vercel Pro value) and polls AssemblyAI server-side in a loop. On **Vercel Hobby the function limit is 60 seconds**, so transcribing anything beyond a short clip will time out before this is reworked into an async job flow.
-- Uploads currently pass **through** the API route (fully buffered in memory), so large lecture videos will also hit serverless request-size/memory limits. Direct browser-to-AssemblyAI upload is not implemented.
+- `/api/transcribe` returns a job ID immediately and the browser polls `GET /api/transcribe/status` (one fast lookup per poll), so long transcriptions no longer block a serverless function — this fits Vercel Hobby's 60-second limit.
+- Uploads still pass **through** the start-transcription request (fully buffered in memory), so very large lecture videos can still hit serverless request-size/memory limits. Direct browser-to-AssemblyAI upload is future work, not implemented.
 - Set `ASSEMBLYAI_API_KEY` and `OPENROUTER_API_KEY` (plus optionally `OPENROUTER_SITE_URL` with your production URL) in the Vercel dashboard under Environment Variables. They are needed at runtime, not at build time.
 
 ## Development

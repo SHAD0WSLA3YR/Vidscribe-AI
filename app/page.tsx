@@ -26,6 +26,9 @@ import { resilientFetch } from '@/lib/network';
 import { useKeyboardShortcuts } from '@/hooks/use-keyboard-shortcuts';
 import type {
   Chapter,
+  TranscribeStartResponse,
+  TranscribeStatusResponse,
+  TranscriptionSegmentPayload,
   TranscriptComment,
   TranscriptDraft,
   TranscriptSegment,
@@ -38,11 +41,88 @@ interface SelectionState {
   text: string;
 }
 
-interface TranscriptionSegmentPayload {
-  id?: string;
-  start: number;
-  end: number;
-  text: string;
+const TRANSCRIBE_POLL_INTERVAL_MS = 4000;
+const TRANSCRIBE_POLL_MAX_ERRORS = 3;
+
+/**
+ * Poll GET /api/transcribe/status until the AssemblyAI job completes.
+ * Resolves with the completed payload (same shape the old synchronous
+ * POST /api/transcribe returned). Rejects on job error, unrecoverable
+ * HTTP errors, repeated network failures, or abort (unmount / restart).
+ */
+async function pollTranscriptionStatus(
+  jobId: string,
+  signal: AbortSignal
+): Promise<Extract<TranscribeStatusResponse, { status: 'completed' }>> {
+  let consecutiveErrors = 0;
+
+  for (;;) {
+    if (signal.aborted) {
+      throw new Error('Transcription was cancelled');
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, TRANSCRIBE_POLL_INTERVAL_MS);
+      signal.addEventListener(
+        'abort',
+        () => {
+          clearTimeout(timer);
+          reject(new Error('Transcription was cancelled'));
+        },
+        { once: true }
+      );
+    });
+
+    if (signal.aborted) {
+      throw new Error('Transcription was cancelled');
+    }
+
+    let response: Response;
+    try {
+      response = await resilientFetch(
+        `/api/transcribe/status?jobId=${encodeURIComponent(jobId)}`,
+        { retries: 0 }
+      );
+    } catch (error) {
+      consecutiveErrors += 1;
+      if (consecutiveErrors > TRANSCRIBE_POLL_MAX_ERRORS) {
+        throw error instanceof Error
+          ? error
+          : new Error('Lost connection while checking transcription status');
+      }
+      continue;
+    }
+
+    if (!response.ok) {
+      // 4xx means the job will never resolve — fail fast without retrying.
+      if (response.status === 400 || response.status === 404) {
+        const body = (await response
+          .json()
+          .catch(() => null)) as { error?: string } | null;
+        throw new Error(
+          body?.error ??
+            `Transcription status check failed (${response.status})`
+        );
+      }
+      consecutiveErrors += 1;
+      if (consecutiveErrors > TRANSCRIBE_POLL_MAX_ERRORS) {
+        throw new Error(
+          `Transcription status check failed (${response.status})`
+        );
+      }
+      continue;
+    }
+
+    consecutiveErrors = 0;
+    const data = (await response.json()) as TranscribeStatusResponse;
+    if (data.status === 'completed') {
+      return data;
+    }
+    if (data.status === 'error') {
+      throw new Error(data.error || 'Transcription failed');
+    }
+    // status === 'processing' → keep polling
+  }
 }
 
 export default function HomePage() {
@@ -69,6 +149,9 @@ export default function HomePage() {
   const [previewFile, setPreviewFile] = useState<File | null>(null);
   const transcriptContainerRef = useRef<HTMLDivElement | null>(null);
   const isProgrammaticScrollRef = useRef(false);
+  // Tracks the in-flight transcription poll so a new transcription or an
+  // unmount cancels it instead of leaving a stray polling loop running.
+  const transcriptionAbortRef = useRef<AbortController | null>(null);
   const [isUserScrolling, setIsUserScrolling] = useState(false);
   const [isTranscriptOutOfSync, setIsTranscriptOutOfSync] = useState(false);
   const [documentTitle, setDocumentTitle] = useState<string>(DEFAULT_TITLE);
@@ -679,6 +762,12 @@ export default function HomePage() {
 
   const handleStartTranscription = useCallback(
     async (file: File) => {
+      // Cancel any previous transcription poll before starting a new one.
+      transcriptionAbortRef.current?.abort();
+      const abortController = new AbortController();
+      transcriptionAbortRef.current = abortController;
+      let progressTimer: ReturnType<typeof setInterval> | undefined;
+
       setIsTranscribing(true);
       setProgressStage('processing');
       setStatusMessage('Processing video file...');
@@ -746,7 +835,7 @@ export default function HomePage() {
         const progressInterval = estimatedTranscriptionTime / 55; // 55% progress range (35 to 90)
 
         // Realistic progress simulation
-        const progressTimer = setInterval(() => {
+        progressTimer = setInterval(() => {
           setTranscriptionProgress((prev) => {
             if (prev >= 90) {
               clearInterval(progressTimer);
@@ -758,18 +847,19 @@ export default function HomePage() {
           });
         }, progressInterval);
 
-        const response = await resilientFetch('/api/transcribe', {
+        // POST /api/transcribe only starts the AssemblyAI job and returns
+        // immediately with a job ID — it never waits for completion, so
+        // long videos can't exceed serverless execution limits.
+        const startResponse = await resilientFetch('/api/transcribe', {
           method: 'POST',
           body: formData,
           retries: 1, // Fewer retries for file uploads
         });
 
-        clearInterval(progressTimer);
-
-        if (!response.ok) {
-          let message = `Transcription failed (${response.status})`;
+        if (!startResponse.ok) {
+          let message = `Failed to start transcription (${startResponse.status})`;
           try {
-            const errorData = (await response.json()) as {
+            const errorData = (await startResponse.json()) as {
               error?: string;
               details?: string;
             } | null;
@@ -786,16 +876,25 @@ export default function HomePage() {
           throw new Error(message);
         }
 
+        const startData =
+          (await startResponse.json()) as Partial<TranscribeStartResponse>;
+        if (!startData.jobId || typeof startData.jobId !== 'string') {
+          throw new Error(
+            'Transcription failed: server did not return a job ID'
+          );
+        }
+
+        // Poll for completion. The progress timer keeps running (capped at
+        // 90%) while we wait, then the existing finalize path takes over.
+        const data = await pollTranscriptionStatus(
+          startData.jobId,
+          abortController.signal
+        );
+
         // Stage 4: Finalizing (90-100%)
         setProgressStage('finalizing');
         setStatusMessage('Finalizing transcript...');
         setTranscriptionProgress(92);
-
-        const data = (await response.json()) as {
-          segments: TranscriptionSegmentPayload[];
-          duration?: number;
-          language_code?: string;
-        };
 
         setTranscriptionProgress(96);
 
@@ -838,10 +937,19 @@ export default function HomePage() {
         }
       } catch (error) {
         console.error(error);
-        setErrorMessage(
-          error instanceof Error ? error.message : 'Failed to transcribe video'
-        );
+        // Aborts (unmount / new transcription) are intentional, not errors.
+        if (!abortController.signal.aborted) {
+          setErrorMessage(
+            error instanceof Error ? error.message : 'Failed to transcribe video'
+          );
+        }
       } finally {
+        if (progressTimer) {
+          clearInterval(progressTimer);
+        }
+        if (transcriptionAbortRef.current === abortController) {
+          transcriptionAbortRef.current = null;
+        }
         setIsTranscribing(false);
         setProgressStage('idle');
         setTranscriptionProgress(0);
@@ -1043,6 +1151,13 @@ export default function HomePage() {
       setStatusMessage(null);
     }
   }, [errorMessage, isExplaining, isTranscribing, statusMessage]);
+
+  // Stop any in-flight transcription polling when the page unmounts.
+  useEffect(() => {
+    return () => {
+      transcriptionAbortRef.current?.abort();
+    };
+  }, []);
 
   return (
     <>

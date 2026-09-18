@@ -61,3 +61,26 @@ export interface ExplainRequestBody {
 export interface ExplainResponse {
   explanation: string;
 }
+
+export interface TranscriptionSegmentPayload {
+  id?: string;
+  start: number;
+  end: number;
+  text: string;
+}
+
+export interface TranscribeStartResponse {
+  jobId: string;
+}
+
+export type TranscribeStatusResponse =
+  | { status: 'processing'; jobId: string }
+  | {
+      status: 'completed';
+      jobId: string;
+      segments: TranscriptionSegmentPayload[];
+      text?: string;
+      duration?: number | null;
+      language_code?: string;
+    }
+  | { status: 'error'; jobId?: string; error: string };
