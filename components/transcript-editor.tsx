@@ -8,7 +8,7 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { createEditor, Editor, Range, Node as SlateNode, type Descendant } from 'slate';
+import { createEditor, Editor, Range, Transforms, Node as SlateNode, type Descendant } from 'slate';
 import { Slate, Editable, ReactEditor, withReact } from 'slate-react';
 import { withHistory } from 'slate-history';
 import { Bold, Italic, MessageCircle, Underline, CheckCircle2, Pencil, X, Check, Trash, Highlighter } from 'lucide-react';
@@ -120,7 +120,7 @@ function SegmentEditor({
     }));
 
     for (const [node, path] of nodes) {
-      Editor.removeMark(editor, 'commentId', { at: path });
+      Transforms.unsetNodes(editor, 'commentId', { at: path });
     }
     onChange(editor.children as unknown as Descendant[]);
   }, [editor, onChange]);
@@ -238,7 +238,7 @@ function SegmentEditor({
 
     // Remove commentId mark from selected nodes
     for (const [, path] of nodes) {
-      Editor.removeMark(editor, 'commentId', { at: path });
+      Transforms.unsetNodes(editor, 'commentId', { at: path });
     }
     
     onChange(editor.children as unknown as Descendant[]);

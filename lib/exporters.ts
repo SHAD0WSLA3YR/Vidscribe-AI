@@ -108,7 +108,7 @@ function generateTXT(
     comments
       .filter((c) => !c.resolved)
       .forEach((comment) => {
-        const segment = segments.find((s) => s.segmentId === comment.segmentId);
+        const segment = segments.find((s) => s.id === comment.segmentId);
         const timestamp = segment ? formatTime(segment.start) : 'Unknown';
         txt += `${getColorName(comment.color)} [${timestamp}] ${comment.note}\n`;
       });

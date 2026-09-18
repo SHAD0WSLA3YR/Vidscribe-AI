@@ -192,7 +192,6 @@ export async function POST(request: Request) {
         top_p: AI_CONFIG.TOP_P,
         max_tokens: AI_CONFIG.MAX_TOKENS.SUMMARY,
         stream: false,
-        reasoning: { effort: 'none' },
         messages: [
           {
             role: 'system',

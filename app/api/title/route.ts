@@ -76,7 +76,6 @@ export async function POST(request: Request) {
             temperature: 0.7,
             max_tokens: 100,
             stream: false,
-            reasoning: { effort: 'none' },
             messages: [
               {
                 role: 'system',

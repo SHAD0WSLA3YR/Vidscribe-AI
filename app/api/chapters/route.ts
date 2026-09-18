@@ -74,7 +74,6 @@ export async function POST(request: Request) {
             max_tokens: 1000,
             stream: false,
             response_format: { type: 'json_object' },
-            reasoning: { effort: 'none' },
             messages: [
               {
                 role: 'system',
