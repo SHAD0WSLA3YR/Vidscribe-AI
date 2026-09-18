@@ -1,0 +1,48 @@
+{
+  "name": "lecture-transcript-studio",
+  "version": "1.0.0",
+  "description": "Upload lecture videos, generate transcripts, chapters, and clarifications with AI.",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "@tailwindcss/forms": "^0.5.7",
+    "@types/node": "^20.10.6",
+    "@types/react": "^18.2.37",
+    "@types/react-dom": "^18.2.15",
+    "autoprefixer": "^10.4.16",
+    "clsx": "^2.0.0",
+    "docx": "^8.5.0",
+    "gsap": "^3.12.2",
+    "jspdf": "^3.0.3",
+    "jszip": "^3.10.1",
+    "lucide-react": "^0.292.0",
+    "nanoid": "^5.1.6",
+    "next": "^15.0.0",
+    "openai": "^4.28.0",
+    "postcss": "^8.4.32",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "slate": "^0.103.0",
+    "slate-history": "^0.93.0",
+    "slate-react": "^0.105.0",
+    "tailwind-merge": "^2.2.1",
+    "tailwindcss": "^3.4.1",
+    "three": "^0.160.0",
+    "typescript": "^5.3.3",
+    "xml-js": "^1.6.11"
+  },
+  "devDependencies": {
+    "@types/three": "^0.181.0",
+    "eslint": "^8.55.0",
+    "eslint-config-next": "^15.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0",
+    "npm": ">=9.0.0"
+  }
+}
