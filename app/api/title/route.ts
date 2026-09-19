@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
+import { cleanModelProse, looksLikeThinking, REASONING_DISABLED } from '@/lib/ai-output';
 
 function createOpenRouterClient(apiKey: string) {
   return new OpenAI({
@@ -54,10 +55,10 @@ export async function POST(request: Request) {
     
     // Models to try in order (fallback if rate limited)
     const models = [
+      'nvidia/nemotron-3-super-120b-a12b:free',
       'nvidia/nemotron-3.5-lightning:free',
       'dots-studio/dots-3-note-preview:free',
       'google/gemma-4-31b-it:free',
-      'nvidia/nemotron-3-super-120b-a12b:free',
     ];
     
     let completion = null;
@@ -74,13 +75,13 @@ export async function POST(request: Request) {
           completion = await client.chat.completions.create({
             model,
             temperature: 0.7,
-            max_tokens: 100,
+            max_tokens: 200,
             stream: false,
             messages: [
               {
                 role: 'system',
                 content:
-                  'You are an expert at creating concise, descriptive titles. Generate a clear, engaging title (5-10 words) that captures the main topic and purpose of the content. The title should be professional and informative. Return ONLY the title text, without quotes, prefixes, or explanations.',
+                  'You are an expert at creating concise, descriptive titles. Generate a clear, engaging title (5-10 words) that captures the main topic and purpose of the content. The title should be professional and informative. Return ONLY the title text, without quotes, prefixes, explanations, thinking, or commentary.',
               },
               {
                 role: 'user',
@@ -89,10 +90,24 @@ export async function POST(request: Request) {
                     ? `\n\nDuration: ${Math.floor(duration / 60)} minutes`
                     : ''
                 }`,
-              },
+},
             ],
+            ...REASONING_DISABLED,
           });
           
+          const rawTitle = completion.choices?.[0]?.message?.content ?? '';
+          if (rawTitle.length > 200 || looksLikeThinking(rawTitle)) {
+            console.log(`🧠 ${model} returned thinking instead of a title, trying next model...`);
+            completion = null;
+            lastError = new Error('Model returned thinking instead of a title');
+            break;
+          }
+          if (!completion.choices?.length || cleanModelProse(rawTitle).trim() === '') {
+            console.error(`❌ ${model} returned empty content, trying next model...`);
+            completion = null;
+            lastError = new Error(`Empty content from model ${model}`);
+            break;
+          }
           console.log(`✓ Success with ${model}`);
           break; // Success, exit retry loop
         } catch (error: any) {
@@ -127,8 +142,6 @@ export async function POST(request: Request) {
       throw lastError || new Error('All models failed');
     }
 
-    console.log('📄 Full response object:', JSON.stringify(completion, null, 2));
-    
     // Check if response exists and has the expected structure
     if (!completion || !completion.choices || completion.choices.length === 0) {
       console.error('❌ Invalid response structure from OpenRouter API');
@@ -138,7 +151,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const title = completion.choices[0]?.message?.content?.trim() ?? '';
+    const title = cleanModelProse(completion.choices[0]?.message?.content ?? '');
     console.log('📄 Generated title:', title);
 
     if (!title) {

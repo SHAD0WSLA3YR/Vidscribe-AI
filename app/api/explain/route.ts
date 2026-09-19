@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { cleanModelProse, looksLikeThinking } from '@/lib/ai-output';
 
 const AI_CONFIG = {
   USE_REAL_API: true, // Always use real API
@@ -27,10 +28,10 @@ const AI_CONFIG = {
 } as const;
 
 const FALLBACK_MODELS = [
+  'nvidia/nemotron-3-super-120b-a12b:free',
   'nvidia/nemotron-3.5-lightning:free',
   'dots-studio/dots-3-note-preview:free',
   'google/gemma-4-31b-it:free',
-  'nvidia/nemotron-3-super-120b-a12b:free',
 ];
 const OPENROUTER_TIMEOUT_MS = AI_CONFIG.TIMEOUT;
 
@@ -163,6 +164,11 @@ export async function POST(request: Request) {
     );
   }
 
+  // Single words / short excerpts need a sentence or two, not an essay —
+  // scale the ask so the model doesn't pad or dump thinking.
+  const excerptWords = text.trim().split(/\s+/).filter(Boolean).length;
+  const isShortExcerpt = excerptWords < 12;
+
   if (!AI_CONFIG.USE_REAL_API) {
     return NextResponse.json(
       { error: 'Real API access is disabled in configuration.' },
@@ -192,11 +198,15 @@ export async function POST(request: Request) {
         top_p: AI_CONFIG.TOP_P,
         max_tokens: AI_CONFIG.MAX_TOKENS.SUMMARY,
         stream: false,
+        // Disable reasoning/chain-of-thought so free models return clean answers
+        reasoning: { enabled: false },
         messages: [
           {
             role: 'system',
             content:
-              'You clarify lecture transcripts. Return a short explanation (max 5 sentences) and, if helpful, include 1-2 bullet points highlighting key takeaways.',
+              isShortExcerpt
+                ? 'You clarify lecture transcripts. Explain the excerpt briefly in 1-2 sentences using plain language. Return ONLY the explanation — no thinking process, analysis steps, bullet points, or meta-commentary.'
+                : 'You clarify lecture transcripts. Return a short explanation (max 5 sentences) and, if helpful, include 1-2 bullet points highlighting key takeaways. Return ONLY the explanation — no thinking process, analysis steps, or meta-commentary.',
           },
           {
             role: 'user',
@@ -214,8 +224,17 @@ export async function POST(request: Request) {
 
       try {
         const completion = await requestOpenRouter(apiKey, model, payload);
-        const explanation =
-          completion.choices?.[0]?.message?.content?.trim() ?? '';
+        const explanation = cleanModelProse(
+          completion.choices?.[0]?.message?.content ?? ''
+        );
+
+        if (looksLikeThinking(explanation)) {
+          attempts.push(
+            `model="${model}" status=200 message="Thinking instead of explanation, trying next"`
+          );
+          console.error('Explain attempt returned thinking, trying next model');
+          continue;
+        }
 
         if (!explanation) {
           attempts.push(

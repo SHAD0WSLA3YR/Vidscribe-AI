@@ -1,1 +1,1 @@
-export const DEFAULT_TITLE = 'Untitled Transcript';
+export const DEFAULT_TITLE = 'Untitled VidScribe Notes';

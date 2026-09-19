@@ -11,8 +11,9 @@ import {
 import { createEditor, Editor, Range, Transforms, Node as SlateNode, type Descendant } from 'slate';
 import { Slate, Editable, ReactEditor, withReact } from 'slate-react';
 import { withHistory } from 'slate-history';
-import { Bold, Italic, MessageCircle, Underline, CheckCircle2, Pencil, X, Check, Trash, Highlighter } from 'lucide-react';
+import { Bold, Italic, MessageCircle, Underline, CheckCircle2, Pencil, X, Check, Trash, Highlighter, Sparkles } from 'lucide-react';
 import { nanoid } from 'nanoid';
+import { MarkdownText } from '@/components/markdown-text';
 
 // Color palette for comment highlights
 const COMMENT_COLORS = [
@@ -65,6 +66,9 @@ interface TranscriptEditorProps {
   onToggleResolved: (commentId: string) => void;
   onUpdateComment: (commentId: string, note: string) => void;
   onDeleteComment: (commentId: string) => void;
+  explanation: string | null;
+  explanationSegmentId: string | null;
+  onDismissExplanation: () => void;
 }
 
 interface SegmentEditorProps {
@@ -82,6 +86,8 @@ interface SegmentEditorProps {
   onToggleResolved: (commentId: string) => void;
   onUpdateComment: (commentId: string, note: string) => void;
   onDeleteComment: (commentId: string) => void;
+  explanation?: string | null;
+  onDismissExplanation?: () => void;
 }
 
 function SegmentEditor({
@@ -94,6 +100,8 @@ function SegmentEditor({
   onToggleResolved,
   onUpdateComment,
   onDeleteComment,
+  explanation,
+  onDismissExplanation,
 }: SegmentEditorProps) {
   const editor = useMemo(
     () => withHistory(withReact(createEditor() as ReactEditor)),
@@ -323,6 +331,34 @@ function SegmentEditor({
           autoCorrect="on"
         />
         
+        {/* AI explanation above notes */}
+        {explanation && (
+          <div className="mt-4 space-y-2 border-t border-slate-200 pt-4 dark:border-slate-700">
+            <div className="rounded-lg border border-violet-200 bg-violet-50 p-3 text-sm dark:border-violet-500/60 dark:bg-violet-500/10">
+              <div className="mb-1 flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
+                <div className="flex items-center gap-1.5">
+                  <Sparkles className="h-3 w-3" />
+                  <span className="font-medium">AI explanation</span>
+                </div>
+                {onDismissExplanation && (
+                  <button
+                    type="button"
+                    onClick={onDismissExplanation}
+                    className="cursor-target rounded-full p-1 text-slate-400 transition hover:bg-violet-200 hover:text-violet-700 dark:hover:bg-violet-500/20 dark:hover:text-violet-300"
+                    aria-label="Dismiss explanation"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                )}
+              </div>
+              <MarkdownText
+                content={explanation}
+                className="whitespace-pre-wrap text-sm text-slate-700 dark:text-slate-200"
+              />
+            </div>
+          </div>
+        )}
+
         {/* Inline comments below segment */}
         {comments.length > 0 && (
           <div className="mt-4 space-y-2 border-t border-slate-200 pt-4 dark:border-slate-700">
@@ -506,6 +542,9 @@ export function TranscriptEditor({
   onToggleResolved,
   onUpdateComment,
   onDeleteComment,
+  explanation,
+  explanationSegmentId,
+  onDismissExplanation,
 }: TranscriptEditorProps) {
   const segmentComments = useMemo(() => {
     return segments.reduce<Record<string, TranscriptComment[]>>(
@@ -542,6 +581,8 @@ export function TranscriptEditor({
           onToggleResolved={onToggleResolved}
           onUpdateComment={onUpdateComment}
           onDeleteComment={onDeleteComment}
+          explanation={segment.id === explanationSegmentId ? explanation : null}
+          onDismissExplanation={onDismissExplanation}
         />
       ))}
     </div>

@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
+import { cleanModelProse, looksLikeThinking, REASONING_DISABLED } from '@/lib/ai-output';
 
 function createOpenRouterClient(apiKey: string) {
   return new OpenAI({
@@ -43,10 +44,10 @@ export async function POST(request: Request) {
 
     // Models to try in order (fallback if rate limited)
     const models = [
-      'deepseek/deepseek-chat-v3.1:free',
-      'moonshotai/kimi-k2:free',
-      'google/gemma-3n-e4b-it:free',
-      'nvidia/nemotron-nano-12b-v2-vl:free',
+      'deepseek/deepseek-v4-flash-0731:free',
+      'dots-studio/dots-3-note-preview:free',
+      'nvidia/nemotron-3-super-120b-a12b:free',
+      'openrouter/free',
     ];
 
     let completion = null;
@@ -90,8 +91,22 @@ export async function POST(request: Request) {
                 content: userPrompt,
               },
             ],
+            ...REASONING_DISABLED,
           });
 
+          const rawTranslation = completion.choices?.[0]?.message?.content ?? '';
+          if (looksLikeThinking(rawTranslation, 3)) {
+            console.log(`🧠 ${model} returned thinking instead of a translation, trying next model...`);
+            completion = null;
+            lastError = new Error('Model returned thinking instead of a translation');
+            break;
+          }
+          if (!completion.choices?.length || cleanModelProse(rawTranslation).trim() === '') {
+            console.log(`❌ ${model} returned empty content, trying next model...`);
+            completion = null;
+            lastError = new Error(`Empty content from model ${model}`);
+            break;
+          }
           console.log(`✓ Translation success with ${model}`);
           break; // Success, exit retry loop
         } catch (error: any) {
@@ -129,8 +144,6 @@ export async function POST(request: Request) {
       throw lastError || new Error('All models failed');
     }
 
-    console.log('📄 Full response object:', JSON.stringify(completion, null, 2));
-
     // Check if response exists and has the expected structure
     if (!completion || !completion.choices || completion.choices.length === 0) {
       console.error('❌ Invalid response structure from OpenRouter API');
@@ -143,7 +156,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const translatedText = completion.choices[0]?.message?.content?.trim() ?? '';
+    const translatedText = cleanModelProse(completion.choices[0]?.message?.content ?? '');
     console.log('📄 Translated text preview:', translatedText.substring(0, 100));
 
     if (!translatedText) {

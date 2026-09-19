@@ -10,9 +10,9 @@ const inter = Inter({
 });
 
 export const metadata: Metadata = {
-  title: 'Lecture Transcribe AI',
+  title: 'VidScribe AI',
   description:
-    'Upload lecture videos, generate transcripts, chapters, and clarifications with AI.',
+    'Turn any lecture video into study-ready notes — transcripts, chapters, summaries, and explanations.',
 };
 
 export default function RootLayout({

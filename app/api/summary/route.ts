@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
+import { cleanModelProse, looksLikeThinking, REASONING_DISABLED } from '@/lib/ai-output';
 
 function createOpenRouterClient(apiKey: string) {
   return new OpenAI({
@@ -44,16 +45,21 @@ export async function POST(request: Request) {
     .map((entry) => `${entry.start.toFixed(1)}s: ${entry.text}`)
     .join('\n');
 
+  // Tiny transcripts can't support a full-length summary — ask for brevity
+  // instead of padding, so the model doesn't babble or dump thinking.
+  const isShortTranscript =
+    transcript.length < 8 || (duration ?? 0) < 60;
+
   try {
     console.log('📝 Creating OpenRouter client...');
     const client = createOpenRouterClient(process.env.OPENROUTER_API_KEY);
     
     // Models to try in order (fallback if rate limited)
     const models = [
+      'nvidia/nemotron-3-super-120b-a12b:free',
       'nvidia/nemotron-3.5-lightning:free',
       'dots-studio/dots-3-note-preview:free',
       'google/gemma-4-31b-it:free',
-      'nvidia/nemotron-3-super-120b-a12b:free',
     ];
     
     let completion = null;
@@ -76,7 +82,9 @@ export async function POST(request: Request) {
               {
                 role: 'system',
                 content:
-                  'You are an expert at summarizing content. Create a clear, comprehensive summary (150-250 words) that captures the full narrative arc, key themes, main concepts, and learning objectives. The summary should give a reader who has not seen the content a complete understanding of what was covered. Focus on the most important information and insights.',
+                  isShortTranscript
+                    ? 'You are an expert at summarizing content. The transcript is very short (under a minute of speech). Write a brief 1-2 sentence summary describing only what was actually said. Do not pad, repeat, or invent content beyond the transcript. Output only the summary — no thinking process, analysis steps, or meta-commentary.'
+                    : 'You are an expert at summarizing content. Create a clear, comprehensive summary (150-250 words) that captures the full narrative arc, key themes, main concepts, and learning objectives. The summary should give a reader who has not seen the content a complete understanding of what was covered. Focus on the most important information and insights. Output only the summary — no thinking process, analysis steps, or meta-commentary.',
               },
               {
                 role: 'user',
@@ -85,10 +93,24 @@ export async function POST(request: Request) {
                     ? `\n\nTotal duration: ${Math.floor(duration / 60)} minutes`
                     : ''
                 }`,
-              },
+},
             ],
+            ...REASONING_DISABLED,
           });
           
+          const rawSummary = completion.choices?.[0]?.message?.content ?? '';
+          if (looksLikeThinking(rawSummary)) {
+            console.log(`🧠 ${model} returned thinking instead of a summary, trying next model...`);
+            completion = null;
+            lastError = new Error('Model returned thinking instead of a summary');
+            break;
+          }
+          if (!completion.choices?.length || cleanModelProse(rawSummary).trim() === '') {
+            console.error(`❌ ${model} returned empty content, trying next model...`);
+            completion = null;
+            lastError = new Error(`Empty content from model ${model}`);
+            break;
+          }
           console.log(`✓ Success with ${model}`);
           break; // Success, exit retry loop
         } catch (error: any) {
@@ -123,8 +145,6 @@ export async function POST(request: Request) {
       throw lastError || new Error('All models failed');
     }
 
-    console.log('📄 Full response object:', JSON.stringify(completion, null, 2));
-    
     // Check if response exists and has the expected structure
     if (!completion || !completion.choices || completion.choices.length === 0) {
       console.error('❌ Invalid response structure from OpenRouter API');
@@ -134,7 +154,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const summary = completion.choices[0]?.message?.content?.trim() ?? '';
+    const summary = cleanModelProse(completion.choices[0]?.message?.content ?? '');
     console.log('📄 Response content length:', summary.length);
     console.log('📄 Response content type:', typeof summary);
     console.log('📄 Response content preview:', summary.substring(0, 200));

@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import OpenAI from 'openai';
 import { nanoid } from 'nanoid';
+import { cleanModelProse, extractJsonObject, looksLikeThinking, REASONING_DISABLED } from '@/lib/ai-output';
 
 function createOpenRouterClient(apiKey: string) {
   return new OpenAI({
@@ -51,10 +52,10 @@ export async function POST(request: Request) {
     
     // Models to try in order (fallback if rate limited)
     const models = [
+      'nvidia/nemotron-3-super-120b-a12b:free',
       'nvidia/nemotron-3.5-lightning:free',
       'dots-studio/dots-3-note-preview:free',
       'google/gemma-4-31b-it:free',
-      'nvidia/nemotron-3-super-120b-a12b:free',
     ];
     
     let completion = null;
@@ -78,15 +79,29 @@ export async function POST(request: Request) {
               {
                 role: 'system',
                 content:
-                  "You are an expert lecture note taker. Given a chronological transcript, group the content into concise, descriptive chapter titles (max 6 words) with accurate start times in seconds. Titles should be engaging and reflect the main idea, not verbatim transcript phrases. Return ONLY valid JSON (no markdown, no extra text) with a 'chapters' array. Each chapter must include 'title' and 'start'. Start times must be ascending. Example: {\"chapters\": [{\"title\": \"Introduction\", \"start\": 0}]}",
+                  "You are an expert lecture note taker. Given a chronological transcript, group the content into concise, descriptive chapter titles (max 6 words) with accurate start times in seconds. Titles should be engaging and reflect the main idea, not verbatim transcript phrases. Return ONLY valid JSON (no markdown, no extra text) with a 'chapters' array. Each chapter must include 'title' and 'start'. Start times must be ascending. Do not output thinking, reasoning, analysis, or commentary — JSON only. Example: {\"chapters\": [{\"title\": \"Introduction\", \"start\": 0}]}",
               },
               {
                 role: 'user',
                 content: `Extract chapters from this transcript:\n\n${trimmedTranscript}\n\nDuration: ${duration ?? 'unknown'} seconds\nMax chapters: ${maxChapters}\n\nReturn ONLY the JSON, nothing else.`,
-              },
+},
             ],
+            ...REASONING_DISABLED,
           });
           
+          const rawChapters = completion.choices?.[0]?.message?.content ?? '';
+          if (looksLikeThinking(rawChapters)) {
+            console.log(`🧠 ${model} returned thinking instead of chapters, trying next model...`);
+            completion = null;
+            lastError = new Error('Model returned thinking instead of chapters');
+            break;
+          }
+          if (!completion.choices?.length || cleanModelProse(rawChapters).trim() === '') {
+            console.error(`❌ ${model} returned empty content, trying next model...`);
+            completion = null;
+            lastError = new Error(`Empty content from model ${model}`);
+            break;
+          }
           console.log(`✓ Success with ${model}`);
           break; // Success, exit retry loop
         } catch (error: any) {
@@ -121,8 +136,6 @@ export async function POST(request: Request) {
       throw lastError || new Error('All models failed');
     }
 
-    console.log('📄 Full response object:', JSON.stringify(completion, null, 2));
-    
     // Check if response exists and has the expected structure
     if (!completion || !completion.choices || completion.choices.length === 0) {
       console.error('❌ Invalid response structure from OpenRouter API');
@@ -132,7 +145,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const content = completion.choices[0]?.message?.content ?? '{"chapters":[]}';
+    const content = cleanModelProse(completion.choices[0]?.message?.content ?? '');
     console.log('📄 Response content length:', content.length);
     console.log('📄 Response content type:', typeof content);
     console.log('📄 Response content preview:', content.substring(0, 200));
@@ -145,8 +158,8 @@ export async function POST(request: Request) {
       );
     }
     
-    // Extract JSON from the response (in case there's extra text)
-    let jsonStr = content.trim();
+    // Extract JSON payload (strips thinking blocks, fences, preamble)
+    let jsonStr = extractJsonObject(content);
     
     // Try to find JSON object in the response
     const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
@@ -156,10 +169,20 @@ export async function POST(request: Request) {
     
     console.log('🔍 Extracted JSON:', jsonStr.substring(0, 150));
     
-    const parsed = JSON.parse(jsonStr) as {
-      chapters?: Array<{ title: string; start: number }>;
-    };
-    const chapters = (parsed.chapters ?? []).map((chapter) => ({
+    let parsed: { chapters?: Array<{ title: string; start: number }> };
+    try {
+      parsed = JSON.parse(jsonStr) as {
+        chapters?: Array<{ title: string; start: number }>;
+      };
+    } catch {
+      // Model returned prose instead of JSON (e.g. a reasoning dump on tiny
+      // inputs) — degrade to empty chapters instead of a 500.
+      console.error('❌ Model returned non-JSON output, returning empty chapters');
+      return NextResponse.json({ chapters: [] });
+    }
+    const chapters = (parsed?.chapters ?? [])
+      .filter((chapter) => chapter != null)
+      .map((chapter) => ({
       id: `chapter-${nanoid()}`,
       title: chapter.title,
       start: Math.max(0, chapter.start),

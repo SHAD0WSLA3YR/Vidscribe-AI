@@ -13,10 +13,8 @@ import type { ProgressStage } from '@/components/status-banner';
 import { ThemeToggle } from '@/components/theme-toggle';
 import { VideoPreview } from '@/components/video-preview';
 import { LazyTargetCursor } from '@/components/lazy-target-cursor';
-import { MarkdownText } from '@/components/markdown-text';
 import { KeyboardShortcutsHelp } from '@/components/keyboard-shortcuts-help';
 import { OfflineIndicator } from '@/components/offline-indicator';
-import { LanguageSelector } from '@/components/language-selector';
 import { loadDraft, saveDraft, clearDraft } from '@/lib/storage';
 import { deserializeTranscription } from '@/lib/slate';
 import { serializeNodesToPlainText } from '@/lib/exporters';
@@ -142,6 +140,7 @@ export default function HomePage() {
     null
   );
   const [explanation, setExplanation] = useState<string | null>(null);
+  const [explanationSegmentId, setExplanationSegmentId] = useState<string | null>(null);
   const [isTranscribing, setIsTranscribing] = useState(false);
   const [isExplaining, setIsExplaining] = useState(false);
   const [isGeneratingSummary, setIsGeneratingSummary] = useState(false);
@@ -777,6 +776,7 @@ export default function HomePage() {
       setChapters([]);
       setComments([]);
       setExplanation(null);
+      setExplanationSegmentId(null);
       setIsUserScrolling(false);
       setIsTranscriptOutOfSync(false);
       setTranscriptionProgress(0);
@@ -969,6 +969,8 @@ export default function HomePage() {
     setProgressStage('analyzing');
     setStatusMessage('Analyzing selected text...');
     setErrorMessage(null);
+    setExplanation(null);
+    setExplanationSegmentId(null);
 
     const segmentIndex = segments.findIndex(
       (segment: TranscriptSegment) => segment.id === selection.segmentId
@@ -1010,6 +1012,7 @@ export default function HomePage() {
 
       const data = (await response.json()) as { explanation: string };
       setExplanation(data.explanation);
+      setExplanationSegmentId(selection.segmentId);
     } catch (error) {
       console.error(error);
       setErrorMessage('Unable to generate explanation right now');
@@ -1018,6 +1021,11 @@ export default function HomePage() {
       setProgressStage('idle');
     }
   }, [selection, segments]);
+
+  const handleDismissExplanation = useCallback(() => {
+    setExplanation(null);
+    setExplanationSegmentId(null);
+  }, []);
 
   const handleGenerateNotes = useCallback(async () => {
     if (segments.length === 0) return;
@@ -1046,7 +1054,7 @@ export default function HomePage() {
 
       // Open Opal URL in new tab
       window.open(
-        'https://opal.withgoogle.com/?flow=drive:/16lOp5CRAAucn5CY-IYNtxxDWfIImlLzt&shared&mode=app',
+          'https://opal.google/app/1huZpTJFrw9VprlpTvLwiCvQPGPJDN96O',
         '_blank',
         'noopener,noreferrer'
       );
@@ -1201,11 +1209,10 @@ export default function HomePage() {
               ) : (
                 <>
                   <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100">
-                    Lecture Transcript Studio
+                    VidScribe AI
                   </h1>
                   <p className="lcp-text">
-                    Upload, transcribe with AssemblyAI (Slam-1), polish, and
-                    export study-ready notes.
+                    Turn any lecture video into study-ready notes.
                   </p>
                 </>
               )}
@@ -1407,17 +1414,7 @@ export default function HomePage() {
                 )}
               </div>
 
-              {explanation && (
-                <div className="rounded-2xl md:rounded-3xl border border-slate-900/10 bg-white p-4 md:p-5 shadow dark:border-slate-700/70 dark:bg-slate-800" role="region" aria-label="AI Explanation">
-                  <h3 className="mb-2 text-sm font-semibold text-slate-700 dark:text-slate-200">
-                    AI explanation
-                  </h3>
-                  <MarkdownText
-                    content={explanation}
-                    className="whitespace-pre-wrap text-sm text-slate-700 dark:text-slate-200"
-                  />
-                </div>
-              )}
+
             </section>
 
             <section className="flex h-full min-h-0 flex-col gap-2 overflow-y-auto" role="main" aria-label="Transcript Editor">
@@ -1429,14 +1426,12 @@ export default function HomePage() {
                       <>
                         <span className="rounded-full bg-blue-50 px-3 py-1 text-blue-600 dark:bg-blue-500/20 dark:text-blue-200">
                           {formatTime(currentSegment.start)} ·{' '}
-                          {Math.max(
-                            0,
-                            currentSegment.end - currentSegment.start
-                          ).toFixed(1)}
-                          s
-                        </span>
-                        <span className="text-slate-400">
-                          Active sentence synced to playback
+                          {formatTime(
+                            Math.max(
+                              0,
+                              currentSegment.end - currentSegment.start
+                            )
+                          )}
                         </span>
                       </>
                     ) : (
@@ -1446,15 +1441,7 @@ export default function HomePage() {
                     )}
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
-                    {detectedLanguage && detectedLanguage !== 'en' && (
-                      <LanguageSelector
-                        sourceLanguage={detectedLanguage}
-                        targetLanguage={targetLanguage}
-                        onTargetLanguageChange={handleTranslateContent}
-                        isTranslating={isTranslating}
-                        translationProgress={translationProgress}
-                      />
-                    )}
+                    {/* Translate pill removed for now — translate API + handlers kept for later re-use */}
                     <ThemeToggle />
                     {isTranscriptOutOfSync && (
                       <button
@@ -1497,6 +1484,7 @@ export default function HomePage() {
                         setComments([]);
                         setSelection(null);
                         setExplanation(null);
+                        setExplanationSegmentId(null);
                         setVideoUrl(null);
                         setVideoName('');
                         setDocumentTitle(DEFAULT_TITLE);
@@ -1526,6 +1514,9 @@ export default function HomePage() {
                       activeSegmentId={activeSegmentId}
                       onSegmentValueChange={handleSegmentValueChange}
                       onSelectionChange={handleSelectionChange}
+                      explanation={explanation}
+                      explanationSegmentId={explanationSegmentId}
+                      onDismissExplanation={handleDismissExplanation}
                       comments={comments}
                       onCreateComment={handleCreateComment}
                       onToggleResolved={handleToggleCommentResolved}
