@@ -1,10 +1,28 @@
 import { NextResponse } from 'next/server';
 import { ASSEMBLY_BASE_URL } from '@/lib/assemblyai';
 
-// This request only uploads the file and starts the AssemblyAI job, then
-// returns immediately. The browser polls GET /api/transcribe/status for
-// completion, so long transcriptions never block a serverless function.
+// This request only starts the AssemblyAI job from a Vercel Blob URL, then
+// returns immediately. The browser uploads the video directly to Vercel Blob
+// (POST /api/upload token flow) and POSTs the resulting public URL here as
+// tiny JSON — video bytes never pass through this serverless function, so
+// the 4.5 MB request-body limit does not apply. The browser polls
+// GET /api/transcribe/status for completion.
 export const maxDuration = 60;
+
+interface TranscribeJsonBody {
+  blobUrl?: unknown;
+  pathname?: unknown;
+  keyterms?: unknown;
+}
+
+function isValidHttpUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
 
 export async function POST(request: Request) {
   if (!process.env.ASSEMBLYAI_API_KEY) {
@@ -14,64 +32,46 @@ export async function POST(request: Request) {
     );
   }
 
-  const formData = await request.formData();
-  const file = formData.get('file');
-  if (!(file instanceof File)) {
-    return NextResponse.json({ error: 'File not provided' }, { status: 400 });
+  let body: TranscribeJsonBody;
+  try {
+    body = (await request.json()) as TranscribeJsonBody;
+  } catch {
+    return NextResponse.json(
+      { error: 'blobUrl is required and must be a valid http(s) URL' },
+      { status: 400 }
+    );
   }
 
+  const blobUrl = typeof body.blobUrl === 'string' ? body.blobUrl : '';
+  if (blobUrl.length === 0 || !isValidHttpUrl(blobUrl)) {
+    return NextResponse.json(
+      { error: 'blobUrl is required and must be a valid http(s) URL' },
+      { status: 400 }
+    );
+  }
+
+  const pathname =
+    typeof body.pathname === 'string' && body.pathname.length > 0
+      ? body.pathname
+      : undefined;
+
   let keyterms: string[] | null = null;
-  const keytermsInput = formData.get('keyterms');
-  if (typeof keytermsInput === 'string') {
-    try {
-      const parsed = JSON.parse(keytermsInput);
-      if (Array.isArray(parsed)) {
-        keyterms = parsed
-          .map((item) =>
-            typeof item === 'string' ? item.trim() : String(item ?? '')
-          )
-          .filter((item) => item.length > 0)
-          .slice(0, 1000);
-      }
-    } catch (error) {
-      console.warn('Failed to parse keyterms_prompt JSON', error);
-    }
+  if (Array.isArray(body.keyterms)) {
+    keyterms = body.keyterms
+      .map((item) =>
+        typeof item === 'string' ? item.trim() : String(item ?? '').trim()
+      )
+      .filter((item) => item.length > 0)
+      .slice(0, 1000);
   }
 
   try {
     console.log(
-      `[Transcribe] Processing file: ${file.name}, size: ${file.size} bytes`
-    );
-    const buffer = Buffer.from(await file.arrayBuffer());
-    console.log(`[Transcribe] Buffer created, uploading to AssemblyAI...`);
-
-    const uploadResponse = await fetch(`${ASSEMBLY_BASE_URL}/upload`, {
-      method: 'POST',
-      headers: {
-        authorization: process.env.ASSEMBLYAI_API_KEY,
-        'Content-Type': 'application/octet-stream',
-      },
-      body: buffer,
-    });
-
-    if (!uploadResponse.ok) {
-      const errorText = await uploadResponse.text();
-      console.error('[Transcribe] AssemblyAI upload failed:', errorText);
-      return NextResponse.json(
-        { error: 'Failed to upload audio to AssemblyAI' },
-        { status: 502 }
-      );
-    }
-
-    const { upload_url: uploadUrl } = (await uploadResponse.json()) as {
-      upload_url: string;
-    };
-    console.log(
-      `[Transcribe] File uploaded successfully, starting transcription...`
+      `[Transcribe] Starting job from blob URL: ${pathname ?? blobUrl}`
     );
 
     const transcriptPayload: Record<string, unknown> = {
-      audio_url: uploadUrl,
+      audio_url: blobUrl,
       speech_model: 'universal', // Supports automatic language detection for 95+ languages
       punctuate: true,
       format_text: true,

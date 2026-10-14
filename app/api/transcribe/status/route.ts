@@ -1,4 +1,8 @@
 import { NextResponse } from 'next/server';
+// Verified against node_modules/@vercel/blob@2.8.1: `del` is exported from
+// the base `@vercel/blob` import (dist/index.d.ts) and accepts a full URL or
+// a pathname: del(urlOrPathname: string | string[], ...).
+import { del } from '@vercel/blob';
 import {
   AssemblyAIError,
   fetchTranscriptionResult,
@@ -23,6 +27,8 @@ export async function GET(request: Request) {
 
   const { searchParams } = new URL(request.url);
   const jobId = searchParams.get('jobId');
+  const blobUrl = searchParams.get('blobUrl');
+  const pathname = searchParams.get('pathname');
 
   if (!isValidJobId(jobId)) {
     return NextResponse.json(
@@ -42,6 +48,20 @@ export async function GET(request: Request) {
         console.log(
           `[Transcribe] Job ${jobId} completed (language: ${result.transcript.language_code})`
         );
+      }
+      // Storage cleanup: AssemblyAI has already fetched the audio, so the
+      // source blob is no longer needed. Fire-and-forget — cleanup must
+      // never fail the request. Prefer the pathname when provided, else the
+      // full blob URL (del() accepts either).
+      const blobTarget = pathname ?? blobUrl;
+      if (blobTarget) {
+        try {
+          void del(blobTarget).catch((err: unknown) => {
+            console.warn('[Blob] cleanup delete failed', err);
+          });
+        } catch (err) {
+          console.warn('[Blob] cleanup delete failed', err);
+        }
       }
       return NextResponse.json({
         status: 'completed',

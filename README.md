@@ -21,9 +21,12 @@ Upload a video, get a transcript you can edit while the video stays in sync, gen
 ## How It Works
 
 ```
-User uploads a video (FormData)
-  → POST /api/transcribe buffers the file in memory and starts an
-    AssemblyAI job, returning immediately with a job ID
+User selects a video
+  → browser uploads it directly to Vercel Blob (POST /api/upload token
+    exchange — video bytes never pass through a serverless function, so
+    the 4.5 MB function body limit does not apply)
+  → POST /api/transcribe with the blob URL starts the AssemblyAI job,
+    returning immediately with a job ID
   → browser polls GET /api/transcribe/status until the job completes
   → transcript segments render in the Slate editor, synced to video playback
   → /api/chapters, /api/summary, /api/title, /api/explain, /api/translate
@@ -32,7 +35,7 @@ User uploads a video (FormData)
   → exports are generated client-side as Blobs and downloaded
 ```
 
-The browser keeps the video itself local (preview via object URL). Only the audio bytes are sent to AssemblyAI, and only transcript text is sent to OpenRouter. Draft state lives in `localStorage`; the server stores nothing between requests.
+The browser uploads the video to Vercel Blob storage (public URL, source of truth for AssemblyAI), keeps a local preview via object URL, and only transcript text is sent to OpenRouter. Once the transcription completes, the status endpoint deletes the blob. Draft state lives in `localStorage`; the server stores nothing between requests.
 
 ## Tech Stack
 
@@ -108,8 +111,9 @@ ASSEMBLYAI_API_KEY=your_key_here
 OPENROUTER_API_KEY=your_key_here
 ```
 
-- `ASSEMBLYAI_API_KEY` — used by `/api/transcribe` to upload audio, create transcription jobs, poll job status, and fetch paragraphs.
+- `ASSEMBLYAI_API_KEY` — used by `/api/transcribe` to create transcription jobs, poll job status, and fetch paragraphs.
 - `OPENROUTER_API_KEY` — used by `/api/chapters`, `/api/summary`, `/api/title`, `/api/translate`, and `/api/explain` to call chat models. `/api/explain` also accepts a comma-separated `OPENROUTER_API_KEYS` list and will try each key in turn.
+- `BLOB_READ_WRITE_TOKEN` — required by `/api/upload` to mint client-upload tokens (video uploads go browser → Vercel Blob directly). Vercel auto-injects this when a Blob store is linked to the project; locally it comes from `vercel env pull`.
 
 Optional (server-only; each has a default in code):
 
@@ -120,6 +124,7 @@ Optional (server-only; each has a default in code):
 # OPENROUTER_BASE_URL=https://openrouter.ai/api/v1/chat/completions
 # OPENROUTER_SITE_URL=https://your-domain.com
 # OPENROUTER_APP_NAME=VidScribe AI
+# BLOB_MAX_UPLOAD_SIZE_MB=512
 # OPENROUTER_MAX_TOKENS_SUMMARY=600
 # OPENROUTER_TEMPERATURE=0.7
 # OPENROUTER_TOP_P=0.9
@@ -130,7 +135,7 @@ Optional (server-only; each has a default in code):
 
 ## AI / External Services
 
-**AssemblyAI** (`/api/transcribe` only): the route buffers the uploaded file in memory, POSTs it to `/v2/upload`, creates a `/v2/transcript` job (`speech_model: "universal"`, `punctuate`, `format_text`, `language_detection`, plus `keyterms_prompt` when the client supplies key terms, capped at 1000), polls the job every 5 seconds until `completed`/`error`, then fetches `/v2/transcript/{id}/paragraphs` and returns normalized segments (`id`, `start`, `end`, `text`, word timings) plus full text and duration.
+**AssemblyAI** (`/api/transcribe` and `/api/transcribe/status`): the transcribe route receives the Vercel Blob URL from the client and creates a `/v2/transcript` job with `audio_url` = that URL (`speech_model: "universal"`, `punctuate`, `format_text`, `language_detection`, plus `keyterms_prompt` when the client supplies key terms, capped at 1000). The status route polls the job until `completed`/`error`, then fetches `/v2/transcript/{id}/paragraphs` and returns normalized segments (`id`, `start`, `end`, `text`, word timings) plus full text and duration — and deletes the source blob from Vercel Blob once the job completes.
 
 **OpenRouter** (all other routes): the app uses the OpenAI SDK with `baseURL: https://openrouter.ai/api/v1` to call free-tier chat models. Routes try multiple models in order with retries/backoff on HTTP 429 before failing. Used for: chapters (`/api/chapters`, default max 8), summaries (`/api/summary`), titles (`/api/title`), explanations with selectable level (`/api/explain`), and translation with per-context prompts for transcript/title/summary/chapter (`/api/translate`).
 
@@ -138,8 +143,9 @@ Optional (server-only; each has a default in code):
 
 All routes live under `app/api/` and accept/return JSON unless noted.
 
-- `POST /api/transcribe` — accepts `multipart/form-data` with `file` (video) and optional `keyterms` (JSON string array). Uploads to AssemblyAI, creates a transcription job, and returns `{ jobId }` immediately without waiting. Talks to AssemblyAI.
-- `GET /api/transcribe/status?jobId=...` — returns `{ status: "processing", jobId }` while the job runs, `{ status: "completed", jobId, segments, text, duration, language_code? }` when done, or `{ status: "error", jobId?, error }` on failure. Each call is a single fast AssemblyAI lookup. Talks to AssemblyAI.
+- `POST /api/upload` — used by the client-upload flow. Issues a short-lived upload token and returns the Blob store upload URL. Accepts video MIME types, server-enforced max size (default 512 MB via `BLOB_MAX_UPLOAD_SIZE_MB`). Talks to Vercel Blob.
+- `POST /api/transcribe` — accepts JSON `{ blobUrl, pathname?, keyterms? }` (the video must already be in Vercel Blob; the video bytes never pass through this endpoint). Creates the AssemblyAI job with `audio_url` = blob URL and returns `{ jobId }` immediately without waiting. Talks to AssemblyAI.
+- `GET /api/transcribe/status?jobId=...&blobUrl=...` — returns `{ status: "processing", jobId }` while the job runs, `{ status: "completed", jobId, segments, text, duration, language_code? }` when done, or `{ status: "error", jobId?, error }` on failure. On completion it also deletes the source blob from Vercel Blob (fire-and-forget; the `blobUrl` query param is optional). Each call is a single fast AssemblyAI lookup. Talks to AssemblyAI.
 - `POST /api/chapters` — accepts `{ transcript: [{ start, text }], duration?, maxChapters? }`. Returns `{ chapters: [{ id, title, start }] }`. Talks to OpenRouter.
 - `POST /api/summary` — accepts `{ transcript, duration? }`. Returns `{ summary }`. Talks to OpenRouter.
 - `POST /api/title` — accepts `{ transcript, duration? }`. Returns `{ title }`. Talks to OpenRouter.
@@ -150,7 +156,7 @@ All routes live under `app/api/` and accept/return JSON unless noted.
 
 - There is currently **no database**. The server keeps no state between requests.
 - Drafts (video name/URL reference, segments, chapters, comments, summary, title, timestamp) persist in browser `localStorage` under the key `lecture-transcript-draft` (`lib/storage.ts`). Clearing the browser storage or calling the in-app clear action removes them.
-- Video blobs are never stored server-side; the preview is a temporary in-memory object URL.
+- Video blobs live in Vercel Blob storage while a transcription is active and are deleted automatically once it completes; the in-app preview uses a temporary in-memory object URL.
 
 ## Exporting
 
@@ -170,9 +176,10 @@ Intended target: **Vercel**.
 
 ### Current Deployment Notes
 
-- `/api/transcribe` returns a job ID immediately and the browser polls `GET /api/transcribe/status` (one fast lookup per poll), so long transcriptions no longer block a serverless function — this fits Vercel Hobby's 60-second limit.
-- Uploads still pass **through** the start-transcription request (fully buffered in memory), so very large lecture videos can still hit serverless request-size/memory limits. Direct browser-to-AssemblyAI upload is future work, not implemented.
-- Set `ASSEMBLYAI_API_KEY` and `OPENROUTER_API_KEY` (plus optionally `OPENROUTER_SITE_URL` with your production URL) in the Vercel dashboard under Environment Variables. They are needed at runtime, not at build time.
+- **Uploads bypass the 4.5 MB function body limit**: videos are uploaded client-side to Vercel Blob (token-exchange flow via `/api/upload`), then `/api/transcribe` receives only a tiny JSON payload with the blob URL. Vercel's 4.5 MB request-body limit no longer applies to video uploads.
+- `/api/transcribe` returns a job ID immediately and the browser polls `GET /api/transcribe/status` (one fast lookup per poll). Both fit comfortably inside Vercel Hobby's 300-second (5-minute) function limit.
+- Blobs are deleted automatically once transcription completes, so storage usage tracks active transcription volume. Note: the `/api/upload` route currently issues tokens to any caller (this app has no auth system) — acceptable for dev/preview, but add user authentication inside `onBeforeGenerateToken` before public production use.
+- Required env vars in the Vercel dashboard: `ASSEMBLYAI_API_KEY`, `OPENROUTER_API_KEY`, and `BLOB_READ_WRITE_TOKEN` (auto-linked when you add a Blob store to the project). Optional: `BLOB_MAX_UPLOAD_SIZE_MB`. They are needed at runtime, not at build time.
 
 ## Development
 

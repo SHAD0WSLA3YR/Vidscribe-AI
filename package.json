@@ -14,6 +14,7 @@
     "@types/node": "^20.10.6",
     "@types/react": "^18.2.37",
     "@types/react-dom": "^18.2.15",
+    "@vercel/blob": "^2.8.1",
     "autoprefixer": "^10.4.16",
     "clsx": "^2.0.0",
     "docx": "^8.5.0",

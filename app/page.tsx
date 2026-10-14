@@ -21,6 +21,7 @@ import { serializeNodesToPlainText } from '@/lib/exporters';
 import { DEFAULT_TITLE } from '@/lib/title';
 import { cn, formatTime } from '@/lib/utils';
 import { resilientFetch } from '@/lib/network';
+import { upload } from '@vercel/blob/client';
 import { useKeyboardShortcuts } from '@/hooks/use-keyboard-shortcuts';
 import type {
   Chapter,
@@ -50,7 +51,8 @@ const TRANSCRIBE_POLL_MAX_ERRORS = 3;
  */
 async function pollTranscriptionStatus(
   jobId: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  blobUrl?: string
 ): Promise<Extract<TranscribeStatusResponse, { status: 'completed' }>> {
   let consecutiveErrors = 0;
 
@@ -77,10 +79,10 @@ async function pollTranscriptionStatus(
 
     let response: Response;
     try {
-      response = await resilientFetch(
-        `/api/transcribe/status?jobId=${encodeURIComponent(jobId)}`,
-        { retries: 0 }
-      );
+      const statusUrl =
+        `/api/transcribe/status?jobId=${encodeURIComponent(jobId)}` +
+        (blobUrl ? `&blobUrl=${encodeURIComponent(blobUrl)}` : '');
+      response = await resilientFetch(statusUrl, { retries: 0 });
     } catch (error) {
       consecutiveErrors += 1;
       if (consecutiveErrors > TRANSCRIBE_POLL_MAX_ERRORS) {
@@ -809,16 +811,29 @@ export default function HomePage() {
         });
         setVideoName(file.name);
 
-        // Stage 2: Uploading (20-35%)
+        // Stage 2: Uploading (20-35%) — browser uploads directly to
+        // Vercel Blob, bypassing the serverless function body limit.
         setProgressStage('uploading');
-        setStatusMessage('Uploading to AssemblyAI...');
-        setTranscriptionProgress(25);
+        setStatusMessage('Uploading video...');
+        setTranscriptionProgress(20);
 
-        const formData = new FormData();
-        formData.append('file', file);
-        formData.append('filename', file.name);
-
-        await new Promise((resolve) => setTimeout(resolve, 400));
+        let blob: { url: string; pathname: string };
+        try {
+          blob = await upload(file.name, file, {
+            access: 'public',
+            handleUploadUrl: '/api/upload',
+            onUploadProgress: ({ percentage }) => {
+              setTranscriptionProgress(20 + percentage * 0.15);
+            },
+          });
+        } catch (uploadError) {
+          setErrorMessage(
+            'Upload failed — is Vercel Blob configured? Check BLOB_READ_WRITE_TOKEN'
+          );
+          throw uploadError instanceof Error
+            ? uploadError
+            : new Error('Upload failed — is Vercel Blob configured? Check BLOB_READ_WRITE_TOKEN');
+        }
         setTranscriptionProgress(35);
 
         // Stage 3: Transcribing (35-90%)
@@ -850,10 +865,19 @@ export default function HomePage() {
         // POST /api/transcribe only starts the AssemblyAI job and returns
         // immediately with a job ID — it never waits for completion, so
         // long videos can't exceed serverless execution limits.
+        // The video bytes already live in Vercel Blob; only a tiny JSON
+        // payload is sent here. No keyterms UI exists in this file, so the
+        // previous behaviour (no keyterms sent) is preserved as an empty array.
+        const keyterms: string[] = [];
         const startResponse = await resilientFetch('/api/transcribe', {
           method: 'POST',
-          body: formData,
-          retries: 1, // Fewer retries for file uploads
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            blobUrl: blob.url,
+            pathname: blob.pathname,
+            keyterms,
+          }),
+          retries: 1,
         });
 
         if (!startResponse.ok) {
@@ -888,7 +912,8 @@ export default function HomePage() {
         // 90%) while we wait, then the existing finalize path takes over.
         const data = await pollTranscriptionStatus(
           startData.jobId,
-          abortController.signal
+          abortController.signal,
+          blob.url
         );
 
         // Stage 4: Finalizing (90-100%)
